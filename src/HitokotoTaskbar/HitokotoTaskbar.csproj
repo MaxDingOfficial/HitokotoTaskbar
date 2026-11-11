@@ -8,7 +8,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>HitokotoTaskbar</AssemblyName>
     <RootNamespace>HitokotoTaskbar</RootNamespace>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <Description>Windows 11 任务栏一言</Description>
     <Company>HitokotoTaskbar</Company>
     <PublishTrimmed>false</PublishTrimmed>

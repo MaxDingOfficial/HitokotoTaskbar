@@ -22,6 +22,9 @@ public sealed partial class AppSettings
     public double VerticalOffset { get; set; }
     public double MaxWidth { get; set; } = 500;
     public string MonitorDeviceName { get; set; } = "";
+    public bool ShowOnAllDisplays { get; set; }
+    public bool AutomaticallyCheckForUpdates { get; set; } = true;
+    public string? LastOpenedUpdateVersion { get; set; }
     public bool ShowQuoteIcon { get; set; } = true;
     public bool EnableTransitions { get; set; }
     public bool ShowTrayIcon { get; set; } = true;

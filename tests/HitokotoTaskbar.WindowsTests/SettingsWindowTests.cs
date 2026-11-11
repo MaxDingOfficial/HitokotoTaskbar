@@ -40,10 +40,12 @@ public sealed class SettingsWindowTests
 
         shortest.Text = "8";
         longest.Text = "18";
+        Assert.Single(Descendants<ComboBox>(window)).SelectedValue = "*";
         save.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
         Assert.NotNull(saved);
         Assert.Equal(original.ApiUrl, saved.ApiUrl);
         Assert.Equal("di", saved.Categories);
+        Assert.True(saved.ShowOnAllDisplays);
         Assert.Equal("?encode=json&min_length=8&max_length=18&c=d&c=i", HitokotoService.BuildRequestUri(saved).Query);
 
         CheckBox FindCategory(string name) => Assert.Single(checks, check => Equals(check.Content, name));

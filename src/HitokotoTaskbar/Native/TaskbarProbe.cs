@@ -19,7 +19,7 @@ public sealed class TaskbarProbe : IDisposable
 {
     private readonly AutomationWorker _automation = new();
     private readonly object _cacheLock = new();
-    private LayoutCache? _cache;
+    private readonly Dictionary<nint, LayoutCache> _cache = new();
     private int _generation;
     private int _cacheVersion;
     private bool _disposed;
@@ -52,18 +52,42 @@ public sealed class TaskbarProbe : IDisposable
     {
         if (invalidateInFlight) Interlocked.Increment(ref _generation);
         Interlocked.Increment(ref _cacheVersion);
-        lock (_cacheLock) _cache = null;
+        lock (_cacheLock) _cache.Clear();
     }
 
-    public async Task<TaskbarSnapshot?> ProbeAsync(string? monitorDeviceName, CancellationToken cancellationToken = default)
+    public async Task<TaskbarSnapshot?> ProbeAsync(string? monitorDeviceName, CancellationToken cancellationToken = default) =>
+        (await ProbeDisplaysAsync(monitorDeviceName, false, cancellationToken).ConfigureAwait(false)).FirstOrDefault();
+
+    public async Task<IReadOnlyList<TaskbarSnapshot>> ProbeDisplaysAsync(string? monitorDeviceName, bool allDisplays,
+        CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         cancellationToken.ThrowIfCancellationRequested();
         var monitors = EnumerateMonitors();
+        if (monitors.Count == 0) return [];
         var monitor = monitors.FirstOrDefault(m => string.Equals(m.DeviceName, monitorDeviceName, StringComparison.OrdinalIgnoreCase))
-                      ?? monitors.FirstOrDefault(m => m.IsPrimary) ?? monitors.FirstOrDefault();
-        if (monitor is null) return null;
-        var taskbar = FindTaskbars().FirstOrDefault(window =>
+                      ?? monitors.FirstOrDefault(m => m.IsPrimary) ?? monitors[0];
+        var taskbars = FindTaskbars();
+        lock (_cacheLock)
+        {
+            foreach (var handle in _cache.Keys.Where(handle => !taskbars.Contains(handle)).ToArray()) _cache.Remove(handle);
+        }
+        IReadOnlyList<MonitorDescriptor> targets = allDisplays ? monitors : [monitor];
+        var snapshots = new List<TaskbarSnapshot>(targets.Count);
+        // The UIA worker is intentionally single-threaded. Scan each display in turn and
+        // retain a separate cache entry per taskbar so displays don't invalidate each other.
+        foreach (var target in targets)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            snapshots.Add(await ProbeMonitorAsync(target, taskbars, cancellationToken).ConfigureAwait(false));
+        }
+        return snapshots;
+    }
+
+    private async Task<TaskbarSnapshot> ProbeMonitorAsync(MonitorDescriptor monitor, IReadOnlyList<nint> taskbars,
+        CancellationToken cancellationToken)
+    {
+        var taskbar = taskbars.FirstOrDefault(window =>
         {
             var handle = NativeMethods.MonitorFromWindow(window, NativeMethods.MonitorDefaultToNearest);
             var info = new NativeMethods.MonitorInfo { Size = (uint)Marshal.SizeOf<NativeMethods.MonitorInfo>(), DeviceName = string.Empty };
@@ -94,7 +118,7 @@ public sealed class TaskbarProbe : IDisposable
         LayoutScan? scan = null;
         lock (_cacheLock)
         {
-            if (_cache is { } cache && cache.Window == taskbar && cache.Bounds == rect &&
+            if (_cache.TryGetValue(taskbar, out var cache) && cache.Bounds == rect && cache.Scale == monitor.Scale &&
                 cache.Generation == generation && DateTimeOffset.UtcNow - cache.FetchedAt < CacheLifetime)
                 scan = cache.Scan;
         }
@@ -117,7 +141,7 @@ public sealed class TaskbarProbe : IDisposable
                 // A content event while UIA was running must not resurrect the invalidated
                 // cache. The next low-frequency check will rescan instead of reusing it.
                 if (cacheVersion == Volatile.Read(ref _cacheVersion))
-                    _cache = new LayoutCache(taskbar, rect, generation, DateTimeOffset.UtcNow, scan);
+                    _cache[taskbar] = new LayoutCache(rect, monitor.Scale, generation, DateTimeOffset.UtcNow, scan);
             }
         }
 
@@ -231,10 +255,10 @@ public sealed class TaskbarProbe : IDisposable
         if (_disposed) return;
         _disposed = true;
         _automation.Dispose();
-        lock (_cacheLock) _cache = null;
+        lock (_cacheLock) _cache.Clear();
     }
 
-    private sealed record LayoutCache(nint Window, PixelRect Bounds, int Generation, DateTimeOffset FetchedAt, LayoutScan Scan);
+    private sealed record LayoutCache(PixelRect Bounds, double Scale, int Generation, DateTimeOffset FetchedAt, LayoutScan Scan);
     private sealed record LayoutScan(bool IsReliable, PixelRect SafeRegion, string Description);
 
     private sealed class AutomationWorker : IDisposable

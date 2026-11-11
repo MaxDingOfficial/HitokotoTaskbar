@@ -10,6 +10,7 @@ namespace HitokotoTaskbar.UI;
 
 public sealed class SettingsWindow : Window
 {
+    private const string AllDisplays = "*";
     private static readonly (char Code, string Label)[] Categories =
     [
         ('a', "动画"), ('b', "漫画"), ('c', "游戏"), ('d', "文学"),
@@ -69,13 +70,13 @@ public sealed class SettingsWindow : Window
         stack.Children.Add(new Expander { Header = "高级：API 地址", Content = advanced });
         Section(stack, "显示位置");
         stack.Children.Add(new TextBlock { Text = "显示器", Margin = new Thickness(0, 4, 0, 5) });
-        var options = new List<MonitorOption> { new("", "跟随主显示器") };
+        var options = new List<MonitorOption> { new("", "跟随主显示器"), new(AllDisplays, "所有显示器（同时显示）") };
         foreach (var m in TaskbarProbe.EnumerateMonitors())
             options.Add(new(m.DeviceName, $"{m.DeviceName} · {m.Bounds.Width} × {m.Bounds.Height} · {m.Scale * 100:0}%" + (m.IsPrimary ? " · 主显示器" : "")));
         if (!string.IsNullOrEmpty(settings.MonitorDeviceName) && options.All(x => x.Device != settings.MonitorDeviceName))
             options.Add(new(settings.MonitorDeviceName, settings.MonitorDeviceName + "（未连接，暂用主显示器）"));
         _monitor = new ComboBox { ItemsSource = options, DisplayMemberPath = nameof(MonitorOption.Label), SelectedValuePath = nameof(MonitorOption.Device),
-            SelectedValue = settings.MonitorDeviceName, Padding = new Thickness(6), Margin = new Thickness(0, 0, 0, 10) };
+            SelectedValue = settings.ShowOnAllDisplays ? AllDisplays : settings.MonitorDeviceName, Padding = new Thickness(6), Margin = new Thickness(0, 0, 0, 10) };
         stack.Children.Add(_monitor);
         Field(stack, "HorizontalOffset", "距任务栏左边缘（DIP，0–2000）", settings.HorizontalOffset);
         Field(stack, "VerticalOffset", "垂直偏移（DIP，-100–100）", settings.VerticalOffset);
@@ -91,6 +92,7 @@ public sealed class SettingsWindow : Window
         Section(stack, "后台运行");
         Check(stack, "ShowTrayIcon", "显示系统托盘图标", settings.ShowTrayIcon);
         Check(stack, "AutoStart", "登录 Windows 后自动启动（仅当前用户）", settings.AutoStart);
+        Check(stack, "AutomaticallyCheckForUpdates", "自动检查更新，发现新版时打开 GitHub 下载页", settings.AutomaticallyCheckForUpdates);
         Hint(stack, "关闭托盘后，仍可右键任务栏文字管理程序；文字隐藏时，重新运行 exe 会打开设置。\n配置保存到 %LOCALAPPDATA%\\HitokotoTaskbar\\settings.json。");
     }
     public void UpdateStatus(string status) => _status.Text = status;
@@ -177,11 +179,14 @@ public sealed class SettingsWindow : Window
             s.TextColor = Text("TextColor");
             if (s.TextColor.Length != 7 || s.TextColor[0] != '#' || !s.TextColor[1..].All(Uri.IsHexDigit))
                 throw new ArgumentException("文字颜色需要使用 #RRGGBB，例如 #F5EAF8。");
-            s.MonitorDeviceName = _monitor.SelectedValue as string ?? "";
+            var monitorChoice = _monitor.SelectedValue as string ?? "";
+            s.ShowOnAllDisplays = monitorChoice == AllDisplays;
+            if (!s.ShowOnAllDisplays) s.MonitorDeviceName = monitorChoice;
             s.ShowQuoteIcon = _checks["ShowQuoteIcon"].IsChecked == true;
             s.EnableTransitions = _checks["EnableTransitions"].IsChecked == true;
             s.ShowTrayIcon = _checks["ShowTrayIcon"].IsChecked == true;
             s.AutoStart = _checks["AutoStart"].IsChecked == true;
+            s.AutomaticallyCheckForUpdates = _checks["AutomaticallyCheckForUpdates"].IsChecked == true;
             var error = _save(s);
             if (error is not null) { _error.Text = error; return; }
             Close();

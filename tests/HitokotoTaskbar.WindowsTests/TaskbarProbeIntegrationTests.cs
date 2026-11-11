@@ -16,12 +16,12 @@ public sealed class TaskbarProbeIntegrationTests(ITestOutputHelper output)
         Assert.SkipWhen(monitors.Count == 0, "No monitors are connected.");
         Assert.Single(monitors, m => m.IsPrimary);
         using var probe = new TaskbarProbe();
+        var snapshots = await probe.ProbeDisplaysAsync(null, true);
+        Assert.Equal(monitors.Select(monitor => monitor.DeviceName), snapshots.Select(snapshot => snapshot.Monitor.DeviceName));
         var visible = 0;
-        foreach (var monitor in monitors)
+        foreach (var snapshot in snapshots)
         {
-            var snapshot = await probe.ProbeAsync(monitor.DeviceName);
-            Assert.NotNull(snapshot);
-            Assert.Equal(monitor.DeviceName, snapshot.Monitor.DeviceName);
+            var monitor = snapshot.Monitor;
             Assert.InRange(snapshot.Monitor.Scale, 0.5, 8);
             Assert.False(string.IsNullOrWhiteSpace(snapshot.Description));
             output.WriteLine($"{monitor.DeviceName}: {monitor.Bounds.Width}x{monitor.Bounds.Height}, scale={monitor.Scale}; {snapshot.Description}");
@@ -35,6 +35,8 @@ public sealed class TaskbarProbeIntegrationTests(ITestOutputHelper output)
             Assert.Equal(snapshot.TaskbarRect.Top, snapshot.SafeRegion.Top);
             Assert.Equal(snapshot.TaskbarRect.Bottom, snapshot.SafeRegion.Bottom);
         }
+        var single = Assert.Single(await probe.ProbeDisplaysAsync(monitors[^1].DeviceName, false));
+        Assert.Equal(monitors[^1].DeviceName, single.Monitor.DeviceName);
         Assert.SkipWhen(visible == 0, "No supported visible taskbar: geometry assertions require a regular desktop session.");
     });
 }

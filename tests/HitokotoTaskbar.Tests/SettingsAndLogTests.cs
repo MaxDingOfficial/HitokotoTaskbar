@@ -13,6 +13,8 @@ public sealed class SettingsAndLogTests : IDisposable
         Assert.Equal(AppSettings.DefaultApiUrl, settings.ApiUrl);
         Assert.Equal(0, settings.MinimumSentenceLength);
         Assert.Equal(28, settings.MaximumSentenceLength);
+        Assert.False(settings.ShowOnAllDisplays);
+        Assert.True(settings.AutomaticallyCheckForUpdates);
         Assert.Equal(5, settings.RefreshIntervalMinutes);
         Assert.Equal("Microsoft YaHei UI", settings.FontFamily);
         Assert.Equal(13, settings.FontSize);
@@ -30,6 +32,7 @@ public sealed class SettingsAndLogTests : IDisposable
             FontFamily = "微软雅黑", FontSize = 15, TextColor = "#AA88CC", Opacity = 0.8,
             RefreshIntervalMinutes = 8, HorizontalOffset = 60, VerticalOffset = -2, MaxWidth = 350,
             MonitorDeviceName = "\\\\.\\DISPLAY2", ShowQuoteIcon = false, EnableTransitions = true,
+            ShowOnAllDisplays = true, AutomaticallyCheckForUpdates = false, LastOpenedUpdateVersion = "1.3.0",
             ShowTrayIcon = false, AutoStart = true,
             LastQuote = new() { Text = "你好，世界。", Source = "测试出处", Author = "测试作者", Uuid = "uuid", FetchedAt = DateTimeOffset.UtcNow }
         };
@@ -48,6 +51,9 @@ public sealed class SettingsAndLogTests : IDisposable
         Assert.Equal(settings.VerticalOffset, loaded.VerticalOffset);
         Assert.Equal(settings.MaxWidth, loaded.MaxWidth);
         Assert.Equal(settings.MonitorDeviceName, loaded.MonitorDeviceName);
+        Assert.True(loaded.ShowOnAllDisplays);
+        Assert.False(loaded.AutomaticallyCheckForUpdates);
+        Assert.Equal("1.3.0", loaded.LastOpenedUpdateVersion);
         Assert.Equal(settings.ShowQuoteIcon, loaded.ShowQuoteIcon);
         Assert.Equal(settings.EnableTransitions, loaded.EnableTransitions);
         Assert.Equal(settings.ShowTrayIcon, loaded.ShowTrayIcon);

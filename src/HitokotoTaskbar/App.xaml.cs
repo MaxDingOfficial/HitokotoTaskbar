@@ -19,18 +19,21 @@ public partial class App : Application
     private SettingsStore _store = null!;
     private AppSettings _settings = new();
     private HitokotoService _api = null!;
+    private GitHubUpdateService _updater = null!;
     private TaskbarProbe _probe = null!;
     private readonly StartupService _startup = new();
     private readonly CancellationTokenSource _stop = new();
     private InstanceService? _instance;
-    private OverlayWindow? _overlay;
+    private TaskbarOverlays? _overlays;
+    private HwndSource? _eventHost;
     private TrayService? _tray;
     private TaskbarEvents? _events;
     private SettingsWindow? _settingsWindow;
     private ActionMenuWindow? _menu;
-    private DispatcherTimer? _refreshTimer, _placementTimer, _eventDebounce;
-    private Task? _fetchTask, _placementTask;
-    private TaskbarSnapshot? _lastSnapshot;
+    private DispatcherTimer? _refreshTimer, _placementTimer, _eventDebounce, _updateTimer;
+    private Task? _fetchTask, _placementTask, _updateTask;
+    private IReadOnlyList<TaskbarSnapshot> _lastSnapshots = [];
+    private GitHubRelease? _pendingUpdate;
     private string _placementStatus = "正在检查任务栏空白区域…";
     private string _fetchStatus = "";
     private bool _exiting, _sessionLocked, _smoke;
@@ -80,19 +83,24 @@ public partial class App : Application
             try { _settings.AutoStart = !_smoke && _startup.IsEnabled(); }
             catch (Exception ex) { _log.Write("无法读取当前用户启动项。", ex); _settings.AutoStart = false; }
             _api = new HitokotoService();
+            _updater = new GitHubUpdateService();
             _probe = new TaskbarProbe();
             _foregroundAtStartup = GetForegroundWindow();
-            _overlay = new OverlayWindow();
-            MainWindow = _overlay;
-            _overlay.InitializeHandle();
-            _overlay.Apply(_settings, _settings.LastQuote);
-            _overlay.NextRequested += () => BeginFetch();
-            _overlay.MenuRequested += ShowMenu;
+            _overlays = new TaskbarOverlays(BeginFetch, ShowMenu);
+            _overlays.Apply(_settings, _settings.LastQuote);
             _tray = new TrayService();
             _tray.MenuRequested += ShowMenu;
             _tray.SettingsRequested += ShowSettings;
             _tray.SetVisible(_settings.ShowTrayIcon);
-            _events = new TaskbarEvents(HwndSource.FromHwnd(_overlay.Handle), kind => StateChanged(kind));
+            // A stable, hidden top-level HWND receives Explorer broadcasts even when every
+            // overlay is closed after changing monitors. Message-only HWNDs miss broadcasts.
+            _eventHost = new HwndSource(new HwndSourceParameters("Hitokoto Taskbar notifications")
+            {
+                WindowStyle = unchecked((int)0x80000000), // WS_POPUP, no WS_VISIBLE
+                ExtendedWindowStyle = 0x08000080, // WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
+                Width = 1, Height = 1
+            });
+            _events = new TaskbarEvents(_eventHost, kind => StateChanged(kind));
             SystemEvents.SessionSwitch += OnSessionSwitch;
             SystemEvents.PowerModeChanged += OnPowerModeChanged;
             _refreshTimer = new DispatcherTimer(DispatcherPriority.Background)
@@ -104,6 +112,13 @@ public partial class App : Application
             _placementTimer.Start();
             _eventDebounce = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(150) };
             _eventDebounce.Tick += (_, _) => { _eventDebounce.Stop(); BeginPlacement(); };
+            if (!_smoke)
+            {
+                _updateTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromDays(1) };
+                _updateTimer.Tick += (_, _) => BeginUpdateCheck(false);
+                _updateTimer.Start();
+                BeginUpdateCheck(false);
+            }
             _log.Write("程序启动。" + (_smoke ? "隔离冒烟测试模式。" : ""));
             BeginPlacement();
             BeginFetch();
@@ -167,7 +182,7 @@ public partial class App : Application
                 _fetchStatus = result.Status == FetchStatus.Throttled ? "刷新过于频繁，请稍后再试。" : "暂时无法获取新语句，保留上次内容。";
                 if (result.Status == FetchStatus.Failed) _log.Write("一言获取失败：" + result.Error);
             }
-            _overlay?.Apply(_settings, _settings.LastQuote, _fetchStatus);
+            _overlays?.Apply(_settings, _settings.LastQuote, _fetchStatus);
             BeginPlacement();
         }
         catch (OperationCanceledException) { }
@@ -182,20 +197,25 @@ public partial class App : Application
     {
         try
         {
-            if (_sessionLocked) { _overlay?.Conceal(); return; }
+            if (_sessionLocked) { _overlays?.ConcealAll(); return; }
             int version = _layoutVersion;
-            var snapshot = await _probe.ProbeAsync(_settings.MonitorDeviceName, _stop.Token);
+            var snapshots = await _probe.ProbeDisplaysAsync(_settings.MonitorDeviceName, _settings.ShowOnAllDisplays, _stop.Token);
             if (_exiting || version != _layoutVersion) return;
-            _lastSnapshot = snapshot;
-            var status = snapshot?.Description ?? "没有可用显示器，等待恢复。";
+            _lastSnapshots = snapshots;
+            var status = snapshots.Count switch
+            {
+                0 => "没有可用显示器，等待恢复。",
+                1 => snapshots[0].Description,
+                _ => string.Join("\n", snapshots.Select(snapshot => $"{snapshot.Monitor.DeviceName}：{snapshot.Description}"))
+            };
             if (status != _placementStatus) { _placementStatus = status; _log.Write(status); }
             _settingsWindow?.UpdateStatus(status);
-            if (snapshot is { IsVisible: true, IsFullscreen: false } && !_sessionLocked)
-                _overlay?.ShowAt(_overlay.MeasurePlacement(snapshot), snapshot.Monitor.Scale);
-            else { _overlay?.Conceal(); _menu?.Close(); }
+            if (_sessionLocked) { _overlays?.ConcealAll(); _menu?.Close(); return; }
+            _overlays?.Place(snapshots);
+            TryOpenPendingUpdate();
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { _overlay?.Conceal(); _log.Write("任务栏定位失败，已隐藏文字。", ex); }
+        catch (Exception ex) { _overlays?.ConcealAll(); _log.Write("任务栏定位失败，已隐藏文字。", ex); }
     }
     private void StateChanged() => StateChanged(TaskbarChangeKind.Environment);
     private void StateChanged(TaskbarChangeKind kind)
@@ -210,14 +230,15 @@ public partial class App : Application
             }
             else if (kind == TaskbarChangeKind.Foreground)
             {
-                if (_lastSnapshot is { } last && FullscreenDetector.IsFullscreenOnMonitor(last.Monitor.Bounds))
-                { _overlay?.Conceal(); _menu?.Close(); }
+                foreach (var snapshot in _lastSnapshots)
+                    if (FullscreenDetector.IsFullscreenOnMonitor(snapshot.Monitor.Bounds) &&
+                        _overlays?.Conceal(snapshot.Monitor.DeviceName) == true) _menu?.Close();
             }
             else
             {
                 _layoutVersion++;
                 _probe.Invalidate();
-                _overlay?.Conceal();
+                _overlays?.ConcealAll();
             }
             // Do not restart an already pending timer: noisy shell providers must not
             // starve the reposition forever or cause a blink on harmless clock events.
@@ -242,6 +263,7 @@ public partial class App : Application
         yield return new("复制当前语句", () => _ = CopyQuoteAsync());
         yield return new("打开一言官网", OpenWebsite);
         yield return new("设置", ShowSettings);
+        yield return new("检查更新", () => BeginUpdateCheck(true));
         yield return new("开机自动启动", ToggleStartup, _settings.AutoStart);
         yield return new("退出程序", () => _ = ExitAsync());
     }
@@ -275,6 +297,66 @@ public partial class App : Application
         try { Process.Start(new ProcessStartInfo("https://hitokoto.cn/") { UseShellExecute = true }); }
         catch (Exception ex) { _log.Write("无法打开一言官网。", ex); _tray?.Notify("无法打开默认浏览器。"); }
     }
+    private void BeginUpdateCheck(bool manual)
+    {
+        if (_exiting || _smoke || (!manual && !_settings.AutomaticallyCheckForUpdates) || _updateTask is { IsCompleted: false }) return;
+        _updateTask = CheckForUpdateAsync(manual);
+    }
+    private async Task CheckForUpdateAsync(bool manual)
+    {
+        try
+        {
+            var result = await _updater.CheckAsync(Version.Parse(VersionName), _stop.Token);
+            if (_exiting) return;
+            if (result.Release is { } release)
+            {
+                if (manual) OpenReleasePage(release, true);
+                else if (_settings.AutomaticallyCheckForUpdates && release.ShouldOpenAutomatically(_settings.LastOpenedUpdateVersion))
+                {
+                    _pendingUpdate = release;
+                    TryOpenPendingUpdate();
+                }
+                return;
+            }
+            if (result.Status == UpdateStatus.Unavailable) _log.Write("检查更新失败：" + result.Error);
+            if (manual) ShowUpdateMessage(result.Status == UpdateStatus.Current
+                ? $"当前版本 v{VersionName}，未发现更新。"
+                : "暂时无法连接 GitHub 检查更新，请稍后再试。");
+        }
+        catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            _log.Write("检查更新失败。", ex);
+            if (manual && !_exiting) ShowUpdateMessage("暂时无法检查更新，请稍后再试。");
+        }
+    }
+    private void TryOpenPendingUpdate()
+    {
+        if (_pendingUpdate is not { } release || !_settings.AutomaticallyCheckForUpdates || _sessionLocked || _exiting) return;
+        if (!release.ShouldOpenAutomatically(_settings.LastOpenedUpdateVersion)) { _pendingUpdate = null; return; }
+        if (TaskbarProbe.EnumerateMonitors().Any(monitor => FullscreenDetector.IsFullscreenOnMonitor(monitor.Bounds))) return;
+        _pendingUpdate = null;
+        OpenReleasePage(release, false);
+    }
+    private void OpenReleasePage(GitHubRelease release, bool manual)
+    {
+        try
+        {
+            using var browser = Process.Start(new ProcessStartInfo(release.DownloadPage.AbsoluteUri) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            _log.Write("无法打开 GitHub 下载页。", ex);
+            if (manual) ShowUpdateMessage("无法打开默认浏览器。请访问 GitHub Releases 下载新版。");
+            return;
+        }
+        if (!release.ShouldOpenAutomatically(_settings.LastOpenedUpdateVersion)) return;
+        _settings.LastOpenedUpdateVersion = release.Version.ToString(3);
+        try { _store.Save(_settings.Copy()); }
+        catch (Exception ex) { _log.Write("无法保存已打开的更新版本。", ex); }
+    }
+    private static void ShowUpdateMessage(string text) =>
+        MessageBox.Show(text, "Hitokoto Taskbar · 检查更新", MessageBoxButton.OK, MessageBoxImage.Information);
     private void ShowSettings()
     {
         if (_exiting) return;
@@ -292,9 +374,11 @@ public partial class App : Application
     {
         bool startupChanged = updated.AutoStart != _settings.AutoStart;
         bool previousStartup = _settings.AutoStart;
+        bool enabledUpdateCheck = updated.AutomaticallyCheckForUpdates && !_settings.AutomaticallyCheckForUpdates;
         try
         {
             updated.LastQuote = _settings.LastQuote;
+            updated.LastOpenedUpdateVersion = _settings.LastOpenedUpdateVersion;
             updated = updated.Validated();
             if (startupChanged && !_smoke) _startup.SetEnabled(updated.AutoStart);
             _store.Save(updated);
@@ -303,7 +387,9 @@ public partial class App : Application
             _refreshTimer.Interval = TimeSpan.FromMinutes(_settings.RefreshIntervalMinutes);
             _refreshTimer.Start();
             _tray?.SetVisible(_settings.ShowTrayIcon);
-            _overlay?.Apply(_settings, _settings.LastQuote);
+            _overlays?.Apply(_settings, _settings.LastQuote);
+            if (!_settings.AutomaticallyCheckForUpdates) _pendingUpdate = null;
+            if (enabledUpdateCheck) BeginUpdateCheck(false);
             StateChanged();
             return null;
         }
@@ -326,14 +412,14 @@ public partial class App : Application
     {
         if (_exiting) return;
         _exiting = true;
-        _refreshTimer?.Stop(); _placementTimer?.Stop(); _eventDebounce?.Stop();
+        _refreshTimer?.Stop(); _placementTimer?.Stop(); _eventDebounce?.Stop(); _updateTimer?.Stop();
         _events?.Dispose(); _events = null;
         _stop.Cancel();
-        _overlay?.Conceal();
+        _overlays?.ConcealAll();
         _menu?.Close(); _settingsWindow?.Close();
         try
         {
-            var work = new[] { _fetchTask, _placementTask }.Where(task => task is not null).Cast<Task>();
+            var work = new[] { _fetchTask, _placementTask, _updateTask }.Where(task => task is not null).Cast<Task>();
             await Task.WhenAll(work);
             if (_instance is not null) await _instance.StopAsync();
         }
@@ -344,11 +430,12 @@ public partial class App : Application
     {
         _exiting = true;
         _stop.Cancel();
-        _refreshTimer?.Stop(); _placementTimer?.Stop(); _eventDebounce?.Stop();
+        _refreshTimer?.Stop(); _placementTimer?.Stop(); _eventDebounce?.Stop(); _updateTimer?.Stop();
         SystemEvents.SessionSwitch -= OnSessionSwitch;
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
         TaskScheduler.UnobservedTaskException -= OnUnobservedTaskException;
-        _events?.Dispose(); _tray?.Dispose(); _api?.Dispose(); _probe?.Dispose();
+        _events?.Dispose(); _eventHost?.Dispose(); _overlays?.Dispose();
+        _tray?.Dispose(); _api?.Dispose(); _probe?.Dispose(); _updater?.Dispose();
         _instance?.Dispose();
         _stop.Dispose();
         _log?.Write("程序退出，已取消后台工作并释放托盘和系统钩子。");
@@ -360,27 +447,28 @@ public partial class App : Application
     private async Task DiagnoseAsync(string path)
     {
         using var probe = new TaskbarProbe();
-        var samples = new List<object>();
-        foreach (var monitor in TaskbarProbe.EnumerateMonitors())
-        {
-            var snapshot = await probe.ProbeAsync(monitor.DeviceName);
-            samples.Add(SnapshotForJson(snapshot));
-        }
+        var samples = (await probe.ProbeDisplaysAsync(null, true)).Select(SnapshotForJson);
         await WriteJsonAsync(path, new { version = VersionName, at = DateTimeOffset.Now, os = Environment.OSVersion.ToString(), samples });
     }
     private async Task CompleteSmokeAsync(string path, int seconds)
     {
         await Task.Delay(TimeSpan.FromSeconds(seconds), _stop.Token);
-        var diagnostic = _overlay is null ? null : NativeWindow.Inspect(_overlay.Handle);
-        if (_lastSnapshot is { IsVisible: true } snapshot)
-            RuntimeDiagnostics.SaveTaskbarImage(Path.ChangeExtension(path, ".png"), snapshot.TaskbarRect);
+        var updateCheck = await _updater.CheckAsync(Version.Parse(VersionName), _stop.Token);
+        var overlays = _overlays!.Inspect();
+        var snapshots = _lastSnapshots;
+        for (var index = 0; index < snapshots.Count; index++)
+            if (overlays.TryGetValue(snapshots[index].Monitor.DeviceName, out var overlay) && overlay.IsVisible)
+                RuntimeDiagnostics.SaveTaskbarImage(Path.ChangeExtension(path, index == 0 ? ".png" : $".display-{index + 1}.png"), snapshots[index].TaskbarRect);
+        var diagnostic = overlays.Values.FirstOrDefault();
         await WriteJsonAsync(path, new
         {
             version = VersionName, at = DateTimeOffset.Now, mode = "isolated-smoke-test",
             foregroundAtStartup = _foregroundAtStartup.ToInt64(), foregroundAtEnd = GetForegroundWindow().ToInt64(),
-            overlayVisible = _overlay?.IsVisible, overlayHandle = _overlay?.Handle.ToInt64(),
+            overlayVisible = overlays.Values.Any(overlay => overlay.IsVisible), overlayHandle = diagnostic?.Handle,
             overlayDiagnostic = diagnostic,
-            quote = _settings.LastQuote, fetchStatus = _fetchStatus, snapshot = SnapshotForJson(_lastSnapshot),
+            overlays, snapshots = snapshots.Select(SnapshotForJson),
+            updateCheck = new { status = updateCheck.Status.ToString(), latestVersion = updateCheck.LatestVersion?.ToString(3), updateCheck.Error },
+            quote = _settings.LastQuote, fetchStatus = _fetchStatus, snapshot = SnapshotForJson(snapshots.FirstOrDefault()),
             successfulFetches = _successfulFetches, firstFetchedAt = _firstFetchedAt,
             elapsedSeconds = seconds, cpuSeconds = Process.GetCurrentProcess().TotalProcessorTime.TotalSeconds,
             workingSetBytes = Environment.WorkingSet,
