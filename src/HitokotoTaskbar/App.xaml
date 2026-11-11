@@ -1,0 +1,8 @@
+<Application x:Class="HitokotoTaskbar.App"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ ShutdownMode="OnExplicitShutdown">
+ <Application.Resources>
+  <SolidColorBrush x:Key="AccentBrush" Color="#A566D8" />
+ </Application.Resources>
+</Application>

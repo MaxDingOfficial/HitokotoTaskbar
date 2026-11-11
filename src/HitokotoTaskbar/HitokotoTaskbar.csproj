@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>HitokotoTaskbar</AssemblyName>
+    <RootNamespace>HitokotoTaskbar</RootNamespace>
+    <Version>1.1.0</Version>
+    <Description>Windows 11 任务栏一言</Description>
+    <Company>HitokotoTaskbar</Company>
+    <PublishTrimmed>false</PublishTrimmed>
+    <DebugType>embedded</DebugType>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+    <!-- WinForms is used only for NotifyIcon. WPF startup reads the PMv2 manifest;
+         there is no WinForms ApplicationConfiguration.Initialize to set DPI. -->
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\HitokotoTaskbar.Core\HitokotoTaskbar.Core.csproj" />
+    <Resource Include="Assets\app.ico" />
+  </ItemGroup>
+</Project>

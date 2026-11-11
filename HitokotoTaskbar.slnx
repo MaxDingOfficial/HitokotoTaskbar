@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/HitokotoTaskbar.Core/HitokotoTaskbar.Core.csproj" />
+    <Project Path="src/HitokotoTaskbar/HitokotoTaskbar.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/HitokotoTaskbar.Tests/HitokotoTaskbar.Tests.csproj" />
+    <Project Path="tests/HitokotoTaskbar.WindowsTests/HitokotoTaskbar.WindowsTests.csproj" />
+  </Folder>
+</Solution>

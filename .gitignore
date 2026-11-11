@@ -1,0 +1,12 @@
+# Local SDK; do not distribute it as application source.
+.tools/
+**/bin/
+**/obj/
+artifacts/
+TestResults/
+.vs/
+.idea/
+*.user
+*.suo
+*.log
+*.tmp
